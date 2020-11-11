@@ -1,0 +1,11 @@
+[Unit]
+Description=Temp. Monitoring for FAN control
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=$RPI_FANSPEED_BIN
+
+[Install]
+WantedBy=multi-user.target
