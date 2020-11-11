@@ -35,11 +35,11 @@ echo "Failed to copy $RPI_FANSPEED_SRC to $RPI_FANSPEED_BIN"
 if [ -x "$SYSTEMD_DIR" ] ; then
 	echo Installing systemd service
 	escape_sed "$RPI_FANSPEED_BIN"
-	systemctl stop "$SERVICE_NAME" &> /dev/null
-	systemctl disable "$SERVICE_NAME" &> /dev/null
+	"$SYSTEMCTL_BIN" stop "$SERVICE_NAME" &> /dev/null
+	"$SYSTEMCTL_BIN" disable "$SERVICE_NAME" &> /dev/null
 	cat "systemd/$SERVICE_NAME.service" | sed "s/\$RPI_FANSPEED_BIN/$ESCAPED_SED/" > "$SYSTEMD_DIR/raspi_fanspeed.service" && \
-	systemctl enable "$SERVICE_NAME" && \
-	systemctl start "$SERVICE_NAME" && echo "Success!" || \
+	"$SYSTEMCTL_BIN" enable "$SERVICE_NAME" && \
+	"$SYSTEMCTL_BIN" start "$SERVICE_NAME" && echo "Success!" || \
 	echo "Failed to start service $SERVICE_NAME"
 else
 	echo "$SYSTEMD_DIR" not found

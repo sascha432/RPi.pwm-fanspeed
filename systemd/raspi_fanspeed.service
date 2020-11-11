@@ -7,7 +7,7 @@ After=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=$RPI_FANSPEED_BIN --mqttuser= --mqtthost=192.168.0.3 -i=60
+ExecStart=$RPI_FANSPEED_BIN --mqttuser= --mqtthost=192.168.0.3 -i=60 --min-fan=35 --min=45
 
 [Install]
 Alias=fanspeed.service
