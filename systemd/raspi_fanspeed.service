@@ -1,11 +1,14 @@
 [Unit]
 Description=Temp. Monitoring for FAN control
+Requires=pigpiod.service
+Requires=mosquitto.service
 After=network-online.target
 
 [Service]
 Type=simple
 User=root
-ExecStart=$RPI_FANSPEED_BIN
+ExecStart=$RPI_FANSPEED_BIN --mqttuser= --mqtthost=192.168.0.3 -i=60
 
 [Install]
+Alias=fanspeed.service
 WantedBy=multi-user.target
