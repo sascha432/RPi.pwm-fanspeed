@@ -13,6 +13,8 @@ import socket
 import shlex
 import syslog
 import re
+import hashlib
+import glob
 
 VERSION = '0.0.1'
 
@@ -24,7 +26,7 @@ class NoMQTT:
         self.client = False
 
     def server(self):
-        return ''
+        return 'disabled'
 
     def client_begin(self):
         pass
@@ -41,8 +43,8 @@ hostname = socket.gethostname()
 if hostname.startswith('localhost'):
     hostname = 'RPi.fanspeed.' + hostname
 
-parser = argparse.ArgumentParser(description='adjust fan speed depending on the temperature')
-parser.add_argument('-i', '--interval', help='fan speed update interval in seconds', type=int, default=15)
+parser = argparse.ArgumentParser(description='adjustable fanspeed with temperature monitoring')
+parser.add_argument('-i', '--interval', help='fan speed update interval in seconds', type=int, default=10)
 parser.add_argument('--min', type=float, help='minimum temperature to turn on fan in \u00b0C (30-70)', default=45)
 parser.add_argument('--max', type=float, help='maximum fan speed if temperature exceeds this value (40-90)', default=70)
 parser.add_argument('--min-fan', type=float, help='minimum fan speed in %%', default=40)
@@ -101,7 +103,6 @@ class MQTT(NoMQTT):
     def __init__(self, user, passwd, host, port, device_name, topic, client, update_rate = 60, hass_autoconfig_prefix = 'homeassistant'):
         NoMQTT.__init__(self)
         self.next_update = time.monotonic();
-        self.hass_autoconfig_prefix = hass_autoconfig_prefix
         self.user = user
         self.passwd = passwd
         self.host = host
@@ -112,26 +113,76 @@ class MQTT(NoMQTT):
             'status': topic.format(device_name=device_name,entity='RPi.fanspeed/status'),
             'json': topic.format(device_name=device_name,entity='RPi.fanspeed/json'),
         })()
+        self.device_name = device_name
         self.auto_discovery = type('obj', (object,), {
-            'prefix': 'homeassistant',
-            'thermal': '{auto_discovery_prefix}/sensor/{device_name}/cpu-thermal/config',
-            'fanspeed': '{auto_discovery_prefix}/sensor/{device_name}/cpu-fanspeed/config',
+            'prefix': hass_autoconfig_prefix,
+            'thermal_zone0': '{auto_discovery_prefix}/sensor/{device_name}_thermal-zone0/config',
+            'duty_cycle': '{auto_discovery_prefix}/sensor/{device_name}_fan-duty-cycle/config',
+            'fan_rpm': '{auto_discovery_prefix}/sensor/{device_name}_fan-rpm/config',
         })()
         self.client = client
 
     def server(self):
+        if self.user=='' and self.passwd=='':
+            return 'anonymous@%s:%u' % (self.host, self.port)
         return '%s@%s:%u' % (self.user, self.host, self.port)
 
     def on_connect(self, client, userdata, flags, rc):
-        verbose("connected to mqtt server: code: %s" % rc)
+        verbose("connected to mqtt server")
         self.connected = True
         self.client.publish(self.topic.status, payload="1")
-        if self.hass_autoconfig_prefix:
+        if self.auto_discovery.prefix:
             self.send_homeassistant_auto_config()
 
+
+    def get_mac_addresses(self):
+        parts = []
+        for iface in glob.glob('/sys/class/net/*/address'):
+            try:
+                with open(iface, 'r') as f:
+                    mac = f.readline().strip()
+                    if not '00:00:00' in mac:
+                        parts.append(mac)
+            except:
+                pass
+        return parts
+
+    def create_hass_auto_conf(self, entity, unit, value_json_name):
+        m = hashlib.md5()
+        m.update(self.device_name.encode())
+        m.update(b':')
+        m.update(entity.encode())
+        m.update(b':')
+        unique_id = m.digest().hex()[0:11]
+
+        connections = []
+        for mac_addr in self.get_mac_addresses():
+            connections.append(["mac", mac_addr])
+
+        return json.dumps({
+            "name": "%s_%s" % (self.device_name, entity),
+            "platform": "mqtt",
+            "unique_id": unique_id,
+            "device": {
+                "identifiers": [ unique_id ],
+                "connections": connections,
+                "model":"RPi.fanspeed",
+                "sw_version": VERSION,
+                "manufacturer": "KFCLabs"
+            },
+            "availability_topic": self.topic.status,
+            "payload_available": 1,
+            "payload_not_available": 0,
+            "state_topic": self.topic.json,
+            "unit_of_measurement": unit,
+            "value_template": "{{ value_json.%s }}" % value_json_name
+        }, ensure_ascii=False, indent=None, separators=(',', ':'))
+
     def send_homeassistant_auto_config(self):
-        # //TODO
-        pass
+        verbose('publishing homeassistant auto configuration')
+        self.client.publish(self.auto_discovery.thermal_zone0, payload=self.create_hass_auto_conf('thermal_zone0', "\u00b0C", 'temperature'), retain=True)
+        self.client.publish(self.auto_discovery.duty_cycle, payload=self.create_hass_auto_conf('duty_cycle', '%', 'duty_cycle'), retain=True)
+        self.client.publish(self.auto_discovery.thermal_zone0, payload=self.create_hass_auto_conf('fan_rpm', "rpm", 'rpm'), retain=True)
 
     def on_disconnect(self, client, userdata, rc):
         verbose("disconnected from mqtt server")
@@ -147,7 +198,6 @@ class MQTT(NoMQTT):
         self.client.reconnect_delay_set(min_delay=1, max_delay=300)
         self.client.will_set(mqtt.topic.status, payload='0', qos=0, retain=True)
         self.client.connect_async(mqtt.host, port=mqtt.port, keepalive=mqtt.keepalive)
-        # client.loop(timeout=1.0)
         self.client.loop_start();
         verbose('connecting to mqtt server %s' % (mqtt.server()))
 
@@ -162,8 +212,9 @@ class MQTT(NoMQTT):
     def client_publish(self, temperature, speed):
         if self.client and self.connected and time.monotonic()>=self.next_update:
             self.next_update = time.monotonic() + self.next_update
-            verbose('publish mqtt')
-            self.client.publish(mqtt.topic.json, payload=get_json(speed, 0, True), retain=True);
+            json_str = get_json(speed, 0, True)
+            verbose('publish mqtt %s' % json_str)
+            self.client.publish(mqtt.topic.json, payload=json_str, retain=True);
             self.client.publish(mqtt.topic.status, payload="1", retain=False)
 
 
@@ -174,6 +225,10 @@ except:
 else:
     mqtt = MQTT(args.mqttuser, args.mqttpass, args.mqtthost, args.mqttport, args.mqttdevicename, args.mqtttopic, paho.mqtt.client.Client(), update_rate=args.mqttupdateinterval, hass_autoconfig_prefix=args.mqtthass)
 
+def speed_to_rpm(x):
+    return max(0, int((-3.7624554951688460e+003 * x**0) +(1.7478905554411597e+002 * x**1) + (-6.3080904805125659e-001 * x**2)))
+    # return max(0, int((-4.2809197420956698e+003 * x**0) + (1.9344721260031608e+002 * (x**1)) + (-7.8859894509697426e-001 * (x**2))))
+
 def temp_to_speed(temp):
     if temp < args.min:
         return 0
@@ -181,13 +236,13 @@ def temp_to_speed(temp):
     speed = (speed * (1.0 - args.min_fan / 100.0)) + args.min_fan
     return min(100.0, speed)
 
-def get_json(speed, indent=None, force=False):
+def get_json(speed, indent=None, force=False, time = None):
     if args.no_json and force==False:
         return '%.0f%% @ %.2f\u00b0C' % (args.temp, speed)
-    return json.dumps({ 'temperature': '%.2f' % args.temp, 'speed': '%.2f' % speed }, indent=indent)
-
-def write(f, speed):
-    f.write(get_json(speed))
+    data = { 'temperature': '%.2f' % args.temp, 'duty_cycle': '%.2f' % speed, 'rpm': speed_to_rpm(speed) }
+    if time!=None:
+        data['ts'] = time
+    return json.dumps(data, indent=indent)
 
 def str_valid(s):
     if not isinstance(s, str):
@@ -226,12 +281,11 @@ def update_log(args, speed):
     if re.match('/^(NUL{1,2}|nul{1,2}|nul|\/dev\/nul{1,2})$/', args.log):
         return
     if args.log=='-':
-        write(sys.stdout, speed)
-        print()
+        print(get_json(speed))
     else:
         verbose('temperature %.2f speed %.2f%% log %s' % (args.temp, speed, args.log))
         with open(args.log, 'w') as f:
-            write(f, speed)
+            f.write(get_json(speed, time=int(time.time())))
 
 # pin 12, 13, 18 and 19 supported
 # level 0.0-100.0
@@ -260,6 +314,10 @@ def set_pwm(pi, pin, level, frequency = None) :
 
     pi.hardware_PWM(pin, frequency, int(level * 10000))
     pwm_level[pin] = level
+
+    # mqtt
+    if mqtt.connected:
+        mqtt.client_publish(args.temp, speed)
 
 def signal_handler(sig, frame):
     verbose('SIGINT')
@@ -320,12 +378,23 @@ if args.mqttuser!=None:
 # sigint handler
 signal.signal(signal.SIGINT, signal_handler)
 
+if args.verbose:
+    verbose('min. fan speed %d%%' % args.min_fan)
+    verbose('min. temperature %.2f°C' % args.min)
+    verbose('max. temperature %.2f°C' % args.max)
+    verbose('check interval %d seconds' % args.interval)
+    verbose('mqtt server %s' % mqtt.server())
+    if mqtt.client!=False:
+        verbose('mqtt update interval %d seconds' % args.mqttupdateinterval)
+        verbose('mqtt device name %s' % args.mqttdevicename)
+        verbose('homeassistant prefix %s' % args.mqtthass)
+
 # loop_forever
 while True:
     with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
         args.temp = float(f.readline()) / 1000.0
     speed = temp_to_speed(args.temp)
-    verbose('temp %.2f speed %.2f%%' % (args.temp, speed))
+    verbose('temp %.2f speed %.2f%% rpm ~%u' % (args.temp, speed, speed_to_rpm(speed)))
 
     set_pwm(pi, args.pin, speed)
     update_log(args, speed)
