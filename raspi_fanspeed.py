@@ -52,15 +52,14 @@ parser.add_argument('-p', '--pin', type=int, choices=[12, 13, 18, 19], help='fan
 parser.add_argument('-f', '--frequency', type=int, help='PWM frequency', default=32000)
 parser.add_argument('-S', '--print-speed', action='store_true', help='Print fan speed table and exit', default=False)
 parser.add_argument('-E', '--onexit-speed', type=float, help='turn fan to 30-100%% when exiting. -1 disable fan on exit', default=75)
-parser.add_argument('--mqttuser', type=str, default=None, help="use phyton mqtt client to connect to MQTT. provide an empty username for an anonymous connection")
+parser.add_argument('--mqttuser', type=str, default=None, help="use phyton mqtt client to connect to MQTT")
 parser.add_argument('--mqttpass', type=str, default='')
 parser.add_argument('--mqtttopic', type=str, default='home/{device_name}/{entity}')
-parser.add_argument('--mqtthass', type=str, default='homeassistant', help="home assistant MQTT auto configuration prefix")
+parser.add_argument('--mqtthass', type=str, default='homeassistant', help="home assistant MQTT auto discovery prefix")
 parser.add_argument('--mqttupdateinterval', type=int, default=60, help="mqtt update interval (30-900 seconds)")
 parser.add_argument('--mqttdevicename', type=str, default=hostname, help='mqtt device name')
-parser.add_argument('-H', '--mqtthost', type=str, default='localhost')
+parser.add_argument('-H', '--mqtthost', type=str, default='localhost', help="set to empty string to disable MQTT")
 parser.add_argument('-P', '--mqttport', type=int, default=1883)
-parser.add_argument('-C', '--cmd', type=str, help='execute command and pipe temperature and speed to process i.e. --cmd="/usr/bin/mosquitto_pub -r -t \'home/{device_name}/RPi.fanspeed/json\' -m \'{message}\'"', default=None)
 parser.add_argument('-L', '--log', type=str, help='write temperature and speed into this file i.e. --log=/var/log/tempmon.json', default=None)
 parser.add_argument('--no-json', action='store_true', default=False)
 parser.add_argument('-V', '--version', action='store_true', default=False)
@@ -179,7 +178,7 @@ class MQTT(NoMQTT):
         }, ensure_ascii=False, indent=None, separators=(',', ':'))
 
     def send_homeassistant_auto_config(self):
-        verbose('publishing homeassistant auto configuration')
+        verbose('publishing homeassistant auto discovery')
         self.client.publish(self.auto_discovery.thermal_zone0, payload=self.create_hass_auto_conf('thermal_zone0', "\u00b0C", 'temperature'), retain=True)
         self.client.publish(self.auto_discovery.duty_cycle, payload=self.create_hass_auto_conf('duty_cycle', '%', 'duty_cycle'), retain=True)
         self.client.publish(self.auto_discovery.thermal_zone0, payload=self.create_hass_auto_conf('fan_rpm', "rpm", 'rpm'), retain=True)
@@ -225,9 +224,9 @@ except:
 else:
     mqtt = MQTT(args.mqttuser, args.mqttpass, args.mqtthost, args.mqttport, args.mqttdevicename, args.mqtttopic, paho.mqtt.client.Client(), update_rate=args.mqttupdateinterval, hass_autoconfig_prefix=args.mqtthass)
 
+# RPM is calculated from PWM level for a specific fan
 def speed_to_rpm(x):
     return max(0, int((-3.7624554951688460e+003 * x**0) +(1.7478905554411597e+002 * x**1) + (-6.3080904805125659e-001 * x**2)))
-    # return max(0, int((-4.2809197420956698e+003 * x**0) + (1.9344721260031608e+002 * (x**1)) + (-7.8859894509697426e-001 * (x**2))))
 
 def temp_to_speed(temp):
     if temp < args.min:
@@ -255,27 +254,6 @@ def update_log(args, speed):
     # mqtt
     mqtt.client_publish(args.temp, speed)
 
-    # command
-    if str_valid(args.cmd):
-        cmd = args.cmd.strip()
-        args = shlex.split(cmd, posix=True)
-        parts = []
-        for val in args:
-            val = val.format(message=get_json(speed))
-            parts.append(shlex.quote(val))
-        cmd_str = ' '.join(parts)
-        verbose('executing command: %s' % cmd_str)
-        return_code = subprocess.run(cmd_str, shell=True).returncode
-        if return_code!=0:
-            error('Failed to execute command: exit code %u: %s' % (return_code, cmd_str))
-            cmd['errors'] += 1
-            if cmd['errors']>10:
-                error('Stopping command: %d error(s): %s' % (cmd['errors'], cmd_str))
-                args.cmd = None
-        else:
-            cmd['errors'] = 0
-
-    # log file
     if not str_valid(args.log):
         return
     if re.match('/^(NUL{1,2}|nul{1,2}|nul|\/dev\/nul{1,2})$/', args.log):
