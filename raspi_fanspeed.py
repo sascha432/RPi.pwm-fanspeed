@@ -32,38 +32,49 @@ class NoMQTT:
     def client_end(self):
         pass
 
+    def client_publish(self, temperature, speed):
+        pass
+
 mqtt = NoMQTT()
 pi = pigpio.pi()
+hostname = socket.gethostname()
+if hostname.startswith('localhost'):
+    hostname = 'RPi.fanspeed.' + hostname
 
-parser = argparse.ArgumentParser(description='Adjust fan speed depending on the temperature')
-parser.add_argument('-i', '--interval', help='Fan speed update interval in seconds', type=int, default=60)
-parser.add_argument('--min', type=int, help='Minimum temperature to turn on fan in \u00b0C', default=45)
-parser.add_argument('--max', type=int, help='Maximum fan speed if temperature exceeds this value', default=70)
-parser.add_argument('--min-fan', type=int, help='Minimum fan speed in %%', default=40)
+parser = argparse.ArgumentParser(description='adjust fan speed depending on the temperature')
+parser.add_argument('-i', '--interval', help='fan speed update interval in seconds', type=int, default=15)
+parser.add_argument('--min', type=float, help='minimum temperature to turn on fan in \u00b0C (30-70)', default=45)
+parser.add_argument('--max', type=float, help='maximum fan speed if temperature exceeds this value (40-90)', default=70)
+parser.add_argument('--min-fan', type=float, help='minimum fan speed in %%', default=40)
 parser.add_argument('-p', '--pin', type=int, choices=[12, 13, 18, 19], help='fan PWM pin. must be capable of hardware PWM', default=19)
 parser.add_argument('-f', '--frequency', type=int, help='PWM frequency', default=32000)
 parser.add_argument('-S', '--print-speed', action='store_true', help='Print fan speed table and exit', default=False)
-parser.add_argument('-E', '--exit-value', type=float, help='Turn fan to 30-100%% when exiting. -1 disable fan on exit', default=75)
+parser.add_argument('-E', '--onexit-speed', type=float, help='turn fan to 30-100%% when exiting. -1 disable fan on exit', default=75)
 parser.add_argument('--mqttuser', type=str, default=None, help="use phyton mqtt client to connect to MQTT. provide an empty username for an anonymous connection")
 parser.add_argument('--mqttpass', type=str, default='')
-parser.add_argument('--mqtttopic', type=str, default='home/{hostname}/{entity}')
+parser.add_argument('--mqtttopic', type=str, default='home/{device_name}/{entity}')
 parser.add_argument('--mqtthass', type=str, default='homeassistant', help="home assistant MQTT auto configuration prefix")
+parser.add_argument('--mqttupdateinterval', type=int, default=60, help="mqtt update interval (30-900 seconds)")
+parser.add_argument('--mqttdevicename', type=str, default=hostname, help='mqtt device name')
 parser.add_argument('-H', '--mqtthost', type=str, default='localhost')
 parser.add_argument('-P', '--mqttport', type=int, default=1883)
-parser.add_argument('-C', '--cmd', type=str, help='execute command and pipe temperature and speed to process i.e. --cmd="/usr/bin/mosquitto_pub -r -t \'home/{hostname}/RPi.fanspeed/json\' -m \'{message}\'"', default=None)#'/usr/bin/mosquitto_pub -r -t \'home/{hostname}/RPi.fanspeed/json\' -m \'{json}\''.format(hostname=hostname))
-parser.add_argument('-t', '--temp', type=float, help='temperature preset', default=25.0)
-parser.add_argument('-v', '--verbose', action='store_true', default=False)
-parser.add_argument('--log', type=str, help='Write temperature and speed into this file i.e. --log=/var/log/tempmon.json', default=None) #'/var/log/tempmon.json'
+parser.add_argument('-C', '--cmd', type=str, help='execute command and pipe temperature and speed to process i.e. --cmd="/usr/bin/mosquitto_pub -r -t \'home/{device_name}/RPi.fanspeed/json\' -m \'{message}\'"', default=None)
+parser.add_argument('-L', '--log', type=str, help='write temperature and speed into this file i.e. --log=/var/log/tempmon.json', default=None)
 parser.add_argument('--no-json', action='store_true', default=False)
-parser.add_argument('--version', action='store_true', default=False)
+parser.add_argument('-V', '--version', action='store_true', default=False)
+parser.add_argument('-v', '--verbose', action='store_true', default=False)
+parser.add_argument('--temp', type=float, default=25.0)
 args = parser.parse_args()
 
 if args.version:
-    print("RPi fanspeed version %s" VERSION)
+    print("RPi fanspeed version %s" % VERSION)
     sys.exit(0)
 
-args.min_fan = max(0, args.min_fan)
-min_fan = min(1, args.min_fan / 100.0)
+# normalize values
+args.min_fan = min(100, max(0, args.min_fan))
+args.min = min(100, max(0, args.min))
+args.max = min(100, max(args.min, args.max))
+args.onexit_speed = args.onexit_speed != -1 and min(100.0, max(args.onexit_speed, float(args.min_fan))) or 0
 args.json = not args.no_json
 
 if args.min_fan<30:
@@ -87,22 +98,24 @@ def error_and_exit(msg, code=-1):
     sys.exit(code)
 
 class MQTT(NoMQTT):
-    def __init__(self, user, passwd, host, port, hostname, topic, client):
+    def __init__(self, user, passwd, host, port, device_name, topic, client, update_rate = 60, hass_autoconfig_prefix = 'homeassistant'):
         NoMQTT.__init__(self)
+        self.next_update = time.monotonic();
+        self.hass_autoconfig_prefix = hass_autoconfig_prefix
         self.user = user
         self.passwd = passwd
         self.host = host
         self.port = port
-        self.keepalive = 60
-        self.thread_id = 1000
+        self.keepalive = update_rate * 2
+        self.connected = False
         self.topic = type('obj', (object,), {
-            'status': topic.format(hostname=hostname,entity='RPi.fanspeed/status'),
-            'json': topic.format(hostname=hostname,entity='RPi.fanspeed/json'),
+            'status': topic.format(device_name=device_name,entity='RPi.fanspeed/status'),
+            'json': topic.format(device_name=device_name,entity='RPi.fanspeed/json'),
         })()
         self.auto_discovery = type('obj', (object,), {
             'prefix': 'homeassistant',
-            'thermal': '{auto_discovery_prefix}/sensor/{hostname}/cpu-thermal/config',
-            'fanspeed': '{auto_discovery_prefix}/sensor/{hostname}/cpu-fanspeed/config',
+            'thermal': '{auto_discovery_prefix}/sensor/{device_name}/cpu-thermal/config',
+            'fanspeed': '{auto_discovery_prefix}/sensor/{device_name}/cpu-fanspeed/config',
         })()
         self.client = client
 
@@ -110,14 +123,26 @@ class MQTT(NoMQTT):
         return '%s@%s:%u' % (self.user, self.host, self.port)
 
     def on_connect(self, client, userdata, flags, rc):
-        print("Connected with result code "+str(rc))
+        verbose("connected to mqtt server: code: %s" % rc)
+        self.connected = True
         self.client.publish(self.topic.status, payload="1")
+        if self.hass_autoconfig_prefix:
+            self.send_homeassistant_auto_config()
+
+    def send_homeassistant_auto_config(self):
+        # //TODO
+        pass
+
+    def on_disconnect(self, client, userdata, rc):
+        verbose("disconnected from mqtt server")
+        self.connected = False
 
     def on_message(self, client, userdata, msg):
         print(msg.topic+" "+str(msg.payload))
 
     def client_begin(self):
         self.client.on_connect = mqtt.on_connect
+        self.client.on_disconnect = mqtt.on_disconnect
         self.client.on_message = mqtt.on_message
         self.client.reconnect_delay_set(min_delay=1, max_delay=300)
         self.client.will_set(mqtt.topic.status, payload='0', qos=0, retain=True)
@@ -127,29 +152,34 @@ class MQTT(NoMQTT):
         verbose('connecting to mqtt server %s' % (mqtt.server()))
 
     def client_end(self):
-        self.client.disconnect();
+        if self.connected:
+            self.client.disconnect();
         self.client.loop_stop(force=False)
         time.sleep(1.0)
         self.client.loop_stop(force=True)
         self.client = False
 
-hostname = socket.gethostname()
-if hostname.startswith('localhost'):
-    hostname = 'RPi.fanspeed.' + hostname
+    def client_publish(self, temperature, speed):
+        if self.client and self.connected and time.monotonic()>=self.next_update:
+            self.next_update = time.monotonic() + self.next_update
+            verbose('publish mqtt')
+            self.client.publish(mqtt.topic.json, payload=get_json(speed, 0, True), retain=True);
+            self.client.publish(mqtt.topic.status, payload="1", retain=False)
+
 
 try:
     import paho.mqtt.client
 except:
     mqtt = NoMQTT()
 else:
-    mqtt = MQTT(args.mqttuser, args.mqttpass, args.mqtthost, args.mqttport, hostname, args.mqtttopic, paho.mqtt.client.Client())
+    mqtt = MQTT(args.mqttuser, args.mqttpass, args.mqtthost, args.mqttport, args.mqttdevicename, args.mqtttopic, paho.mqtt.client.Client(), update_rate=args.mqttupdateinterval, hass_autoconfig_prefix=args.mqtthass)
 
 def temp_to_speed(temp):
     if temp < args.min:
         return 0
-    speed = (temp - args.min) / (args.max - args.min)
-    speed = (speed * (1.0 - min_fan)) + min_fan
-    return min(1.0, speed) * 100.0
+    speed = (temp - args.min) / (args.max - args.min) * 100
+    speed = (speed * (1.0 - args.min_fan / 100.0)) + args.min_fan
+    return min(100.0, speed)
 
 def get_json(speed, indent=None, force=False):
     if args.no_json and force==False:
@@ -159,17 +189,19 @@ def get_json(speed, indent=None, force=False):
 def write(f, speed):
     f.write(get_json(speed))
 
+def str_valid(s):
+    if not isinstance(s, str):
+        return False
+    if not s.strip():
+        return False
+    return True
 
 def update_log(args, speed):
     # mqtt
-    if mqtt.client!=False:
-        verbose('publish')
-        if isinstance(speed, float):
-            mqtt.client.publish(mqtt.topic.json, payload=get_json(speed, 0, True), retain=True);
-        mqtt.client.publish(mqtt.topic.status, payload="1")
+    mqtt.client_publish(args.temp, speed)
 
     # command
-    if args.cmd!=None and args.cmd.strip()!='':
+    if str_valid(args.cmd):
         cmd = args.cmd.strip()
         args = shlex.split(cmd, posix=True)
         parts = []
@@ -189,9 +221,9 @@ def update_log(args, speed):
             cmd['errors'] = 0
 
     # log file
-    if args.log==None or args.log.strip()=='':
+    if not str_valid(args.log):
         return
-    if isinstance(args.log, str) and re.match('/^(NUL{1,2}|nul{1,2}|nul|\/dev\/nul{1,2})$/', args.log):
+    if re.match('/^(NUL{1,2}|nul{1,2}|nul|\/dev\/nul{1,2})$/', args.log):
         return
     if args.log=='-':
         write(sys.stdout, speed)
@@ -236,12 +268,12 @@ def signal_handler(sig, frame):
         verbose('sending SIGTERM')
         os.kill(os.getpid(), signal.SIGTERM)
 
-    speed = args.exit_value
+    speed = args.onexit_speed
     set_pwm(pi, args.pin, speed)
     update_log(args, speed)
 
     if cmd['sig_counter']>1:
-        print('sending SIGKILL', file=sys.stderr)
+        print('sending SIGKILL')
         time.sleep(1.0)
         os.kill(os.getpid(), signal.SIGKILL)
 
@@ -250,33 +282,46 @@ def signal_handler(sig, frame):
         mqtt.client_end()
     sys.exit(0)
 
-args.exit_value = args.exit_value != -1 and min(100.0, max(args.exit_value, float(args.min_fan))) or 0
 
+# print table
+if args.verbose or args.print_speed:
+    i = 30
+    j = -1
+    # incr = int((temp_to_speed(90) - temp_to_speed(30)) / 60.0) + 1
+    json_output = {}
+    while i<=90:
+        n = temp_to_speed(i)
+        # i += incr
+        key = '%03.0f%%' % float(n)
+        if key not in json_output:
+            json_output[key] = '%.1f\u00b0C' % i
+        i += 1
+
+    if args.json:
+        print(json.dumps(json_output, indent=2, ensure_ascii=not sys.getdefaultencoding().startswith('utf') and '<stdin>' in sys.stdin.name))
+    else:
+        for key, val in json_output.items():
+            print('%s: %s' % (key, val))
+
+# and exit
+if args.print_speed:
+    sys.exit(0)
+
+# check if mqtt is enabled
 if args.mqttuser!=None:
     if mqtt.client==False:
         error('MQTT client not available')
     else:
         mqtt.client_begin()
+        mqttupdateinterval = max(30, min(900, args.mqttupdateinterval))
+        if args.interval>args.mqttupdateinterval:
+            args.interval = args.mqttupdateinterval
 
-if args.verbose or args.print_speed:
-    i = 30
-    j = -1
-    incr = int((temp_to_speed(90) - temp_to_speed(30)) / 60.0) + 1
-    json_output = {}
-    while i<90:
-        n = temp_to_speed(i)
-        i += incr
-        json_output['%03.0f%%' % float(n)] = '%.1f\u00b0C' % i
-    if args.print_speed or args.verbose:
-        if args.json:
-            print(json.dumps(json_output, indent=2, ensure_ascii=not sys.getdefaultencoding().startswith('utf') and '<stdin>' in sys.stdin.name))
-        else:
-            for key, val in json_output.items():
-                print('%s: %s' % (key, val))
-
+# sigint handler
 signal.signal(signal.SIGINT, signal_handler)
 
-while not args.print_speed:
+# loop_forever
+while True:
     with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
         args.temp = float(f.readline()) / 1000.0
     speed = temp_to_speed(args.temp)

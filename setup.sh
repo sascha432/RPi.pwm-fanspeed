@@ -39,7 +39,8 @@ if [ -x "$SYSTEMD_DIR" ] ; then
 	"$SYSTEMCTL_BIN" disable "$SERVICE_NAME" &> /dev/null
 	cat "systemd/$SERVICE_NAME.service" | sed "s/\$RPI_FANSPEED_BIN/$ESCAPED_SED/" > "$SYSTEMD_DIR/raspi_fanspeed.service" && \
 	"$SYSTEMCTL_BIN" enable "$SERVICE_NAME" && \
-	"$SYSTEMCTL_BIN" start "$SERVICE_NAME" && echo "Success!" || \
+	"$SYSTEMCTL_BIN" start "$SERVICE_NAME" && echo -e "Success!\n\n" && \
+	"$SYSTEMCTL_BIN" status "$SERVICE_NAME" || \
 	echo "Failed to start service $SERVICE_NAME"
 else
 	echo "$SYSTEMD_DIR" not found
@@ -47,6 +48,3 @@ fi
 
 echo -e "\ntry\n$RPI_FANSPEED_BIN --help"
 
-if [ -x "$SYSTEMCTL_BIN" ] ; then
-	echo -e "\nsystemctl status fanspeed\n\n"
-fi
