@@ -1,13 +1,12 @@
 [Unit]
 Description=adjustable fanspeed with temperature monitoring
 Requires=pigpiod.service
-Requires=mosquitto.service
 After=network-online.target
 
 [Service]
 Type=simple
 User=root
-ExecStart=$RPI_FANSPEED_COMMAND_LINE --mqttuser= --mqtthost=192.168.0.3 --min-fan=30 --min=44 --log=/var/log/fanspeed.json
+ExecStart=$RPI_FANSPEED_COMMAND_LINE
 
 [Install]
 Alias=fanspeed.service

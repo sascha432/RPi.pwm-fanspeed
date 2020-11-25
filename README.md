@@ -69,15 +69,16 @@ It also adds the homeassistant auto discovery with the prefix `homeassistant` an
 ## CLI
 
 ```
-usage: raspi_fanspeed.py [-h] [-i INTERVAL] [--min MIN] [--max MAX]
-                         [--min-fan MIN_FAN] [-p {12,13,18,19}] [-f FREQUENCY]
+usage: raspi_fanspeed.py [-h] [-i INTERVAL] [--set SET] [--measure MEASURE]
+                         [--min MIN] [--max MAX] [--min-fan MIN_FAN]
+                         [-p {12,13,18,19}] [--rpm-pin RPM_PIN] [-f FREQUENCY]
                          [-S] [-E ONEXIT_SPEED] [--mqttuser MQTTUSER]
-                         [--mqttpass MQTTPASS] [--mqtttopic MQTTTOPIC]
-                         [--mqtthass MQTTHASS]
+                         [--mqttpass MQTTPASS]
+                         [--mqttdevicename MQTTDEVICENAME]
+                         [--mqtttopic MQTTTOPIC] [--mqtthass MQTTHASS]
                          [--mqttupdateinterval MQTTUPDATEINTERVAL]
-                         [--mqttdevicename MQTTDEVICENAME] [-H MQTTHOST]
-                         [-P MQTTPORT] [-C CMD] [-L LOG] [--no-json] [-V] [-v]
-                         [--temp TEMP]
+                         [-H MQTTHOST] [-P MQTTPORT] [-L LOG] [-V] [-v]
+                         [--pid PID]
 
 adjustable fanspeed with temperature monitoring
 
@@ -85,32 +86,34 @@ optional arguments:
   -h, --help            show this help message and exit
   -i INTERVAL, --interval INTERVAL
                         fan speed update interval in seconds
+  --set SET             set speed in %
+  --measure MEASURE     measure rpm for n seconds and exit
   --min MIN             minimum temperature to turn on fan in °C (30-70)
   --max MAX             maximum fan speed if temperature exceeds this value
                         (40-90)
   --min-fan MIN_FAN     minimum fan speed in %
   -p {12,13,18,19}, --pin {12,13,18,19}
                         fan PWM pin. must be capable of hardware PWM
+  --rpm-pin RPM_PIN     read RPM signal from pin
   -f FREQUENCY, --frequency FREQUENCY
                         PWM frequency
   -S, --print-speed     Print fan speed table and exit
   -E ONEXIT_SPEED, --onexit-speed ONEXIT_SPEED
                         turn fan to 30-100% when exiting. -1 disable fan on
                         exit
-  --mqttuser MQTTUSER   use phyton mqtt client to connect to MQTT. provide an
-                        empty username for an anonymous connection
+  --mqttuser MQTTUSER   use phyton mqtt client to connect to MQTT
   --mqttpass MQTTPASS
-  --mqtttopic MQTTTOPIC
-  --mqtthass MQTTHASS   home assistant MQTT auto discovery prefix
-  --mqttupdateinterval MQTTUPDATEINTERVAL
-                        mqtt update interval (30-900 seconds)
   --mqttdevicename MQTTDEVICENAME
                         mqtt device name
+  --mqtttopic MQTTTOPIC
+  --mqtthass MQTTHASS
+  --mqttupdateinterval MQTTUPDATEINTERVAL
+                        mqtt update interval (30-900 seconds)
   -H MQTTHOST, --mqtthost MQTTHOST
   -P MQTTPORT, --mqttport MQTTPORT
-  -L LOG, --log LOG     write temperature and speed into this file i.e.
+  -L LOG, --log LOG     write temperature and speed to this file i.e.
                         --log=/var/log/tempmon.json
-  --no-json
   -V, --version
   -v, --verbose
+  --pid PID
 ```
