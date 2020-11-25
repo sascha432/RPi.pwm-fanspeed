@@ -66,6 +66,10 @@ When the service is running with MQTT enabled, it pushes the temperature and fan
 
 It also adds the homeassistant auto discovery with the prefix `homeassistant` and two sensors should be detected.
 
+![Overview](images/hass1.jpg)
+![RPM Details](images/hass2.jpg)
+![CPU](images/hass3.jpg)
+
 ## CLI
 
 ```
