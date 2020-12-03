@@ -36,15 +36,11 @@ class RPiFanSpeedControl(object):
     def set_args(self, args):
         # normalize values
         args.min_fan = min(100, max(0, args.min_fan))
-        args.min = min(100, max(0, args.min))
-        args.max = min(100, max(args.min, args.max))
+        args.min = max(0, args.min)
+        args.max = max(args.min, args.max)
         args.onexit_speed = args.onexit_speed != -1 and min(100.0, max(args.onexit_speed, float(args.min_fan))) or 0
         if args.pid!=None and args.pid:
             self.pidfile = args.pid
-
-        if args.min_fan<30:
-            print('WARNING! minimum level below 30%. make sure the fan turns on at low levels')
-
         self.args = args
 
     def create_pid(self):
@@ -55,7 +51,7 @@ class RPiFanSpeedControl(object):
             pass
 
     def remove_pid(self):
-        if os.exists(self.pidfile):
+        if os.path.exists(self.pidfile):
             try:
                 os.unlink(self.pidfile)
             except:
@@ -83,7 +79,9 @@ class RPiFanSpeedControl(object):
     def temp_to_speed(self, temp):
         if temp < args.min:
             return 0
-        speed = (temp - args.min) / (args.max - args.min) * 100
+        speed = (temp - args.min)
+        speed = pow(speed, args.lin)
+        speed = speed  / (args.max - args.min) * 100
         speed = (speed * (1.0 - args.min_fan / 100.0)) + args.min_fan
         return float(min(100.0, speed))
 
@@ -213,8 +211,9 @@ parser = argparse.ArgumentParser(description='adjustable fanspeed with temperatu
 parser.add_argument('-i', '--interval', help='fan speed update interval in seconds', type=int, default=10)
 parser.add_argument('--set', type=float, help='set speed in %%', default=None)
 parser.add_argument('--measure', type=float, help='measure rpm for n seconds and exit', default=None)
-parser.add_argument('--min', type=float, help='minimum temperature to turn on fan in \u00b0C (30-70)', default=45)
-parser.add_argument('--max', type=float, help='maximum fan speed if temperature exceeds this value (40-90)', default=70)
+parser.add_argument('--min', type=float, help='minimum temperature to turn on fan in \u00b0C', default=45)
+parser.add_argument('--max', type=float, help='maximum fan speed if temperature exceeds this value', default=70)
+parser.add_argument('--lin', type=float, help='temperature/duty cycle factor. 1.0 = linear', default=1.0)
 parser.add_argument('--min-fan', type=float, help='minimum fan speed in %%', default=40)
 parser.add_argument('-p', '--pin', type=int, choices=[12, 13, 18, 19], help='fan PWM pin. must be capable of hardware PWM', default=19)
 parser.add_argument('--rpm-pin', type=int, help='read RPM signal from pin', default=16)
@@ -285,7 +284,7 @@ class MQTT(NoMQTT):
         return '%s@%s:%u' % (account, self.host, self.port)
 
     def on_connect(self, client, userdata, flags, rc):
-        verbose("connected to mqtt server")
+        verbose("connected to mqtt server, return code %u" % rc)
         self.next_update = time.monotonic() + 5
         self.connected = True
         self.client.will_set(self.topic.status, payload='0', qos=2, retain=True)
@@ -364,7 +363,8 @@ class MQTT(NoMQTT):
         self.client.on_message = self.on_message
         self.client.reconnect_delay_set(min_delay=1, max_delay=30)
         self.client.will_set(self.topic.status, payload='0', qos=2, retain=True)
-        self.client.connect_async(self.host, port=self.port, keepalive=self.keepalive)
+        self.client.connect(self.host, port=self.port, keepalive=self.keepalive)
+        # self.client.connect_async(self.host, port=self.port, keepalive=self.keepalive)
         self.client.loop_start();
 
     def client_end(self):
@@ -450,12 +450,19 @@ def set_pwm(pin, level, measure = True) :
     if measure:
         time.sleep(2) # give it some time to change
         measure_rpm()
+        n = 0
+        while level>0 and fsc.rpm==0 and n<5:
+            measure_rpm(1.0)
+            n += 1
+        if level>0 and fsc.rpm==0:
+            verbose("stall detected. setting speed to 100%")
+            fsc.set_speed(100)
 
     # mqtt
     mqtt.client_publish(fsc.get_temp(), fsc.get_speed())
 
 def signal_term_handler(sig, frame):
-    if os.exists(args.pidfile):
+    if os.path.exists(args.pidfile):
         verbose('removing: %s')
         os.unlink(args.pidfile)
     sys.exit(15)
@@ -478,7 +485,7 @@ def signal_handler(sig, frame):
         os.kill(os.getpid(), signal.SIGKILL)
 
     mqtt.client_end()
-    if os.exists(args.pidfile):
+    if os.path.exists(args.pidfile):
         verbose('removing: %s')
         os.unlink(args.pidfile)
     sys.exit(2)
@@ -488,6 +495,7 @@ if args.set:
     level = max(0 ,min(100, args.set))
     print("set level to %f" % level)
     args.speed = level
+    args.onexit_speed = level
     fsc.pigpio.hardware_PWM(args.pin, args.frequency, int(level * 10000))
     fsc.set_speed(level)
 
@@ -503,7 +511,7 @@ if args.verbose or args.print_speed:
     while i<=90:
         n = fsc.temp_to_speed(i)
         # i += incr
-        key = '%03.0f%%' % float(n)
+        key = '%03.1f%%' % float(n)
         if key not in json_output:
             json_output[key] = '%.1f\u00b0C' % i
         i += 1

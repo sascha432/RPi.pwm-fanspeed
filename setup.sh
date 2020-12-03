@@ -53,6 +53,10 @@ if [ "$MAX_TEMP" != "" ] ; then
 	CMD_ARGS+=("--max=$MAX_TEMP")
 fi
 
+if [ "$LIN_TEMP" != "" ] ; then
+	CMD_ARGS+=("--lin=$LIN_TEMP")
+fi
+
 if [ "$MIN_FAN_DUTY_CYCLE" != "" ] ; then
 	CMD_ARGS+=("--min-fan=$MIN_FAN_DUTY_CYCLE")
 fi
