@@ -118,94 +118,35 @@ class NoMQTT:
     def available(self):
         return False
 
-class reader:
-   def __init__(self, pi, gpio, weighting=0.0):
-      self.pi = pi
-      self.gpio = gpio
-
-      if weighting < 0.0:
-         weighting = 0.0
-      elif weighting > 0.99:
-         weighting = 0.99
-
-      self._new = 1.0 - weighting # Weighting for new reading.
-      self._old = weighting       # Weighting for old reading.
-
-      self._high_tick = None
-      self._period = None
-      self._high = None
-
-      pi.set_mode(gpio, pigpio.INPUT)
-
-      self._cb = pi.callback(gpio, pigpio.EITHER_EDGE, self._cbf)
-
-   def _cbf(self, gpio, level, tick):
-
-      if level == 1:
-
-         if self._high_tick is not None:
-            t = pigpio.tickDiff(self._high_tick, tick)
-
-            if self._period is not None:
-               self._period = (self._old * self._period) + (self._new * t)
-            else:
-               self._period = t
-
-         self._high_tick = tick
-
-      elif level == 0:
-
-         if self._high_tick is not None:
-            t = pigpio.tickDiff(self._high_tick, tick)
-
-            if self._high is not None:
-               self._high = (self._old * self._high) + (self._new * t)
-            else:
-               self._high = t
-
-   def frequency(self):
-      if self._period is not None:
-         return 1000000.0 / self._period
-      else:
-         return 0.0
-
-   def pulse_width(self):
-      if self._high is not None:
-         return self._high
-      else:
-         return 0.0
-
-   def duty_cycle(self):
-      if self._high is not None:
-         return 100.0 * self._high / self._period
-      else:
-         return 0.0
-
-   def cancel(self):
-      self._cb.cancel()
-
-# PWM_GPIO = 4
-# RUN_TIME = 60.0
-# SAMPLE_TIME = 2.0
-
 pi = pigpio.pi()
-# p = read_PWM.reader(pi, PWM_GPIO)
-# start = time.time()
-# while (time.time() - start) < RUN_TIME:
-#     time.sleep(SAMPLE_TIME)
-#     f = p.frequency()
-#     pw = p.pulse_width()
-#     dc = p.duty_cycle()
-#     print("f={:.1f} pw={} dc={:.2f}".format(f, int(pw+0.5), dc))
-# p.cancel()
-
 
 fsc = RPiFanSpeedControl(pi)
 mqtt = NoMQTT()
 
+def get_mac_addresses():
+    parts = []
+    for iface in glob.glob('/sys/class/net/*/address'):
+        try:
+            with open(iface, 'r') as f:
+                mac = f.readline().strip()
+                if not '00:00:00' in mac:
+                    parts.append(mac)
+        except:
+            pass
+    return parts
+
 hostname = socket.gethostname()
 if hostname.startswith('localhost'):
     hostname = 'RPi.fanspeed.' + hostname
+
+def generate_client_id(hostname):
+    m = hashlib.md5()
+    m.update(hostname.encode())
+    m.update(b':')
+    for mac in get_mac_addresses():
+        m.update(b':')
+        m.update(mac.encode())
+    return '' + m.digest().hex()[0:11]
 
 parser = argparse.ArgumentParser(description='adjustable fanspeed with temperature monitoring')
 parser.add_argument('-i', '--interval', help='fan speed update interval in seconds', type=int, default=10)
@@ -224,7 +165,7 @@ parser.add_argument('--mqttuser', type=str, default=None, help="use phyton mqtt 
 parser.add_argument('--mqttpass', type=str, default='')
 parser.add_argument('--mqttdevicename', type=str, default=hostname, help='mqtt device name')
 parser.add_argument('--mqtttopic', type=str, default='home/{device_name}/{entity}')
-parser.add_argument('--mqtthass', type=str, default=None)
+parser.add_argument('--mqtthass', type=str, default='homeassistant')
 parser.add_argument('--mqttupdateinterval', type=int, default=60, help="mqtt update interval (30-900 seconds)")
 parser.add_argument('-H', '--mqtthost', type=str, default=None)
 parser.add_argument('-P', '--mqttport', type=int, default=1883)
@@ -243,29 +184,30 @@ def verbose(msg):
     if fsc.args.verbose:
         print(msg)
 
-def error(msg):
-#    if fsc.args.verbose and (sys.stderr.fileno()!=2 or sys.stdout.fileno()!=1):
-    print(msg)
-#    sys.stderr.write(msg)
-#    sys.stderr.write(os.linesep)
+def send_syslog(msg, level = syslog.LOG_ERR):
     if syslog!=None:
-        syslog.syslog(syslog.LOG_ERR, msg)
+        syslog.syslog(level, msg)
+
+def error(msg):
+    print(msg)
+    send_syslog(msg)
 
 def error_and_exit(msg, code=-1):
     error(msg)
     sys.exit(code)
 
 class MQTT(NoMQTT):
-    def __init__(self, user, passwd, host, port, device_name, topic, client, update_rate = 60, hass_autoconfig_prefix = 'homeassistant'):
+    def __init__(self, user, passwd, host, port, device_name, topic, client, update_rate = 60, hass_autoconfig_prefix='homeassistant', client_id=''):
         NoMQTT.__init__(self)
         self.next_update = time.monotonic();
         self.user = user
         self.passwd = passwd
         self.host = host
         self.port = port
-        self.keepalive = max(15, int(update_rate / 4))
         self.update_rate = update_rate;
+        self.client_id = client_id
         self.connected = False
+        # self.last_update = time.monotonic()
         self.topic = type('obj', (object,), {
             'status': topic.format(device_name=device_name,entity='RPi.fanspeed/status'),
             'json': topic.format(device_name=device_name,entity='RPi.fanspeed/json'),
@@ -283,27 +225,6 @@ class MQTT(NoMQTT):
         account = (not self.user or not self.passwd) and 'anonymous' or self.user
         return '%s@%s:%u' % (account, self.host, self.port)
 
-    def on_connect(self, client, userdata, flags, rc):
-        verbose("connected to mqtt server, return code %u" % rc)
-        self.next_update = time.monotonic() + 5
-        self.connected = True
-        self.client.will_set(self.topic.status, payload='0', qos=2, retain=True)
-        self.publish(self.topic.status, payload="1", retain=True)
-        if self.auto_discovery.prefix:
-            self.send_homeassistant_auto_config()
-
-    def get_mac_addresses(self):
-        parts = []
-        for iface in glob.glob('/sys/class/net/*/address'):
-            try:
-                with open(iface, 'r') as f:
-                    mac = f.readline().strip()
-                    if not '00:00:00' in mac:
-                        parts.append(mac)
-            except:
-                pass
-        return parts
-
     def create_hass_auto_conf(self, entity, unit, value_json_name):
         m = hashlib.md5()
         m.update(self.device_name.encode())
@@ -313,7 +234,7 @@ class MQTT(NoMQTT):
         unique_id = m.digest().hex()[0:11]
 
         connections = []
-        for mac_addr in self.get_mac_addresses():
+        for mac_addr in get_mac_addresses():
             connections.append(["mac", mac_addr])
 
         return json.dumps({
@@ -328,8 +249,8 @@ class MQTT(NoMQTT):
                 "manufacturer": "KFCLabs"
             },
             "availability_topic": self.topic.status,
-            "payload_available": 1,
-            "payload_not_available": 0,
+            "payload_available": "1",
+            "payload_not_available": "0",
             "state_topic": self.topic.json,
             "unit_of_measurement": unit,
             "value_template": "{{ value_json.%s }}" % value_json_name
@@ -338,10 +259,18 @@ class MQTT(NoMQTT):
     def get_topic(self, topic, payload):
         return topic.format(auto_discovery_prefix=self.auto_discovery.prefix, json=payload, device_name=self.device_name)
 
-    def publish(self, topic, payload, retain=True):
+    def publish(self, topic, payload, retain=True, qos=2):
         topic = self.get_topic(topic, payload)
         verbose('publish mqtt %s: %s' % (topic, payload))
-        self.client.publish(topic, payload, retain)
+        try:
+            self.client.publish(topic, payload, retain=retain, qos=qos)
+            return True
+        except Exception as e:
+            verbose("exception %s" % e)
+            send_syslog('MQTT error: %s' % e)
+            if fsc.args.verbose:
+                raise e
+        return False
 
     def send_homeassistant_auto_config(self):
         verbose('publishing homeassistant auto discovery')
@@ -349,38 +278,89 @@ class MQTT(NoMQTT):
         self.publish(self.auto_discovery.duty_cycle, payload=self.create_hass_auto_conf('duty_cycle', '%', 'duty_cycle'), retain=True)
         self.publish(self.auto_discovery.rpm, payload=self.create_hass_auto_conf('rpm', "rpm", 'rpm'), retain=True)
 
+    def rc_to_str(self, rc):
+        errors = {
+            0: 'Connection successful',
+            1: 'Connection refused - incorrect protocol version',
+            2: 'Connection refused - invalid client identifier',
+            3: 'Connection refused - server unavailable',
+            4: 'Connection refused - bad username or password',
+            5: 'Connection refused - not authorised'
+        }
+        if rc in errors:
+            return errors[rc]
+        return 'Unknown response #%u' % rc
+
+    def on_connect(self, client, userdata, flags, rc):
+        verbose("connected to mqtt server: %s (%s)" % (self.rc_to_str(rc), self.client_id))
+        if rc!=0:
+            send_syslog('Failed to connect to MQTT server %s: %s' % (mqtt.server(), self.rc_to_str(rc)))
+            self.connected = False
+            return
+        self.next_update = time.monotonic() + 5
+        self.connected = True
+        try:
+            self.publish(self.topic.status, payload="1", retain=True)
+            if self.auto_discovery.prefix:
+                self.send_homeassistant_auto_config()
+        except Exception as e:
+            verbose("exception %s" % e)
+            send_syslog('MQTT error: %s' % e)
+            if fsc.args.verbose:
+                raise e
+
     def on_disconnect(self, client, userdata, rc):
-        verbose("disconnected from mqtt server")
+        info = ''
+        if rc!=0:
+            info = ': %s' % self.rc_to_str(rc)
+        verbose("disconnected from mqtt server%s" % info)
+        send_syslog('Disconnected from MQTT server %s%s' % (mqtt.server(), info))
         self.connected = False
 
     def on_message(self, client, userdata, msg):
         print(msg.topic+" "+str(msg.payload))
 
+    def on_log(self, client, userdata, level, buf):
+        verbose('%s: %s' % (level, buf))
+
     def client_begin(self):
         verbose('connecting to mqtt server %s' % (mqtt.server()))
-        self.client.on_connect = self.on_connect
-        self.client.on_disconnect = self.on_disconnect
-        self.client.on_message = self.on_message
-        self.client.reconnect_delay_set(min_delay=1, max_delay=30)
-        self.client.will_set(self.topic.status, payload='0', qos=2, retain=True)
-        self.client.connect(self.host, port=self.port, keepalive=self.keepalive)
-        # self.client.connect_async(self.host, port=self.port, keepalive=self.keepalive)
-        self.client.loop_start();
+        try:
+            self.client.on_connect = self.on_connect
+            self.client.on_disconnect = self.on_disconnect
+            self.client.on_message = self.on_message
+            self.client.on_log = self.on_log
+            self.client.reconnect_delay_set(min_delay=5, max_delay=60)
+            self.client.will_set(self.get_topic(self.topic.status, "0"), payload="0", qos=2, retain=True)
+            self.client.connect(self.host, port=self.port, keepalive=15)
+            # self.client.connect_async(self.host, port=self.port, keepalive=15)
+            self.client.loop_start();
+        except Exception as e:
+            verbose("exception %s" % e)
+            send_syslog('MQTT error: %s' % e)
+            if fsc.args.verbose:
+                raise e
 
     def client_end(self):
         verbose('disconnecting from mqtt server')
-        if self.connected:
-            # self.publish(self.topic.status, payload="0", retain=True)
-            self.client.disconnect();
-        self.client.loop_stop(force=False)
-        time.sleep(1.0)
-        self.client.loop_stop(force=True)
-        self.client = False
+        try:
+            if self.connected:
+                self.client.disconnect();
+            self.client.loop_stop(force=False)
+            time.sleep(1.0)
+            self.client.loop_stop(force=True)
+            self.client = False
+        except Exception as e:
+            self.client = False
+            verbose("exception %s" % e)
+            send_syslog('MQTT error: %s' % e)
+            if fsc.args.verbose:
+                raise e
 
     def client_publish(self, temperature, speed):
         if self.connected and time.monotonic()>=self.next_update:
             self.next_update = time.monotonic() + self.update_rate
-            self.publish(self.topic.json, payload=fsc.get_json(indent=0, ts=True), retain=True);
+            self.publish(self.topic.json, payload=fsc.get_json(indent=0, ts=True), retain=True)
             self.publish(self.topic.status, payload="1", retain=True)
 
     def available(self):
@@ -390,7 +370,9 @@ try:
     if args.mqtthost==None:
         raise RuntimeError()
     import paho.mqtt.client
-    mqtt = MQTT(args.mqttuser, args.mqttpass, args.mqtthost, args.mqttport, args.mqttdevicename, args.mqtttopic, paho.mqtt.client.Client(), update_rate=args.mqttupdateinterval, hass_autoconfig_prefix=args.mqtthass)
+    client_id = generate_client_id(hostname)
+    client = paho.mqtt.client.Client(client_id=client_id, clean_session=True)
+    mqtt = MQTT(args.mqttuser, args.mqttpass, args.mqtthost, args.mqttport, args.mqttdevicename, args.mqtttopic, client, update_rate=args.mqttupdateinterval, hass_autoconfig_prefix=args.mqtthass, client_id=client_id)
 except:
     mqtt = NoMQTT()
 
@@ -575,7 +557,9 @@ while True:
         set_pwm(args.pin, fsc.get_speed())
         update_log(args)
     except Exception as e:
-        print(e)
+        error(e)
+        if fsc.args.verbose:
+            raise e
 
     if args.interval<1:
         verbose('interval < 1 second, exiting...')

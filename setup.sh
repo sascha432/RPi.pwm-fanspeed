@@ -31,6 +31,14 @@ fi
 
 declare -a CMD_ARGS
 
+VERBOSE="0"
+if [ "$RASPI_FANSPEED_INSTALL_TYPE" == "showcli" ] ; then
+	if [ -e ./raspi_fanspeed.py ] ; then
+		RPI_FANSPEED_BIN="./raspi_fanspeed.py"
+		VERBOSE="1"
+	fi
+fi
+
 CMD_ARGS+=("$RPI_FANSPEED_BIN")
 
 if [ "$FAN_PWM_PIN" != "" ] ; then
@@ -85,14 +93,22 @@ else
 	CMD_ARGS+=("--mqttuser=")
 fi
 
+if [ "$VERBOSE" == "1" ] ; then
+	CMD_ARGS+=("--verbose")
+fi
+
 RPI_FANSPEED_COMMAND_LINE="${CMD_ARGS[@]@Q}"
 
 if [ "$RASPI_FANSPEED_INSTALL_TYPE" == "showcli" ] ; then
 
+	echo "Stop service:"
 	echo
-	echo "Command to start the service in foreground"
+	echo "systemctl stop fanspeed"
+	echo
+	echo "Command to start the service in foreground:"
 	echo
 	echo "$RPI_FANSPEED_COMMAND_LINE"
+	echo
 	exit 0
 
 elif [ "$RASPI_FANSPEED_INSTALL_TYPE" == "install" ] ; then
