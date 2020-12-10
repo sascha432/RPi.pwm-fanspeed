@@ -18,6 +18,8 @@ import hashlib
 import glob
 
 VERSION = '0.0.1'
+MODEL = "RPi.fanspeed"
+MANUFACTURER = "KFCLabs"
 
 class RPiFanSpeedControl(object):
 
@@ -129,7 +131,7 @@ def get_mac_addresses():
         try:
             with open(iface, 'r') as f:
                 mac = f.readline().strip()
-                if not '00:00:00' in mac:
+                if map.strip('0:')!='':
                     parts.append(mac)
         except:
             pass
@@ -137,7 +139,7 @@ def get_mac_addresses():
 
 hostname = socket.gethostname()
 if hostname.startswith('localhost'):
-    hostname = 'RPi.fanspeed.' + hostname
+    hostname = '%s.%s' % (MODEL, hostname)
 
 def generate_client_id(hostname):
     m = hashlib.md5()
@@ -215,9 +217,9 @@ class MQTT(NoMQTT):
         self.device_name = device_name
         self.auto_discovery = type('obj', (object,), {
             'prefix': hass_autoconfig_prefix,
-            'thermal_zone0': '{auto_discovery_prefix}/sensor/{device_name}_thermal-zone0/config',
-            'duty_cycle': '{auto_discovery_prefix}/sensor/{device_name}_duty-cycle/config',
-            'rpm': '{auto_discovery_prefix}/sensor/{device_name}_rpm/config',
+            'thermal_zone0': '{auto_discovery_prefix}/sensor/{device_name}-thermal-zone0/config',
+            'duty_cycle': '{auto_discovery_prefix}/sensor/{device_name}-duty-cycle/config',
+            'rpm': '{auto_discovery_prefix}/sensor/{device_name}-rpm/config',
         })()
         self.client = client
 
@@ -225,28 +227,30 @@ class MQTT(NoMQTT):
         account = (not self.user or not self.passwd) and 'anonymous' or self.user
         return '%s@%s:%u' % (account, self.host, self.port)
 
-    def create_hass_auto_conf(self, entity, unit, value_json_name):
+    def create_hass_auto_conf(self, entity, unit, value_json_name, device_class):
         m = hashlib.md5()
-        m.update(self.device_name.encode())
-        m.update(b':')
-        m.update(entity.encode())
-        m.update(b':')
+        m.update((':'.join([self.device_name, MODEL, MANUFACTURER, entity, unit, value_json_name])).encode())
         unique_id = m.digest().hex()[0:11]
+
+        m = hashlib.md5()
+        m.update((':'.join([self.device_name, MODEL, MANUFACTURER])).encode())
+        device_unique_id = m.digest().hex()[0:11]
 
         connections = []
         for mac_addr in get_mac_addresses():
             connections.append(["mac", mac_addr])
 
         return json.dumps({
-            "name": "%s_%s" % (self.device_name, entity),
+            "name": "%s-%s" % (self.device_name, entity.replace('_', '-')),
             "platform": "mqtt",
             "unique_id": unique_id,
             "device": {
-                "identifiers": [ unique_id ],
+                "name": "%s-%s-%s" % (self.device_name, MODEL, device_unique_id[0:4]),
+                "identifiers": [ device_unique_id, '72762b3e8dae07899742cf8a2a68216d39feb535' ],
                 "connections": connections,
-                "model":"RPi.fanspeed",
+                "model": MODEL,
                 "sw_version": VERSION,
-                "manufacturer": "KFCLabs"
+                "manufacturer": MANUFACTURER,
             },
             "availability_topic": self.topic.status,
             "payload_available": "1",
@@ -274,9 +278,9 @@ class MQTT(NoMQTT):
 
     def send_homeassistant_auto_config(self):
         verbose('publishing homeassistant auto discovery')
-        self.publish(self.auto_discovery.thermal_zone0, payload=self.create_hass_auto_conf('thermal_zone0', "\u00b0C", 'temperature'), retain=True)
-        self.publish(self.auto_discovery.duty_cycle, payload=self.create_hass_auto_conf('duty_cycle', '%', 'duty_cycle'), retain=True)
-        self.publish(self.auto_discovery.rpm, payload=self.create_hass_auto_conf('rpm', "rpm", 'rpm'), retain=True)
+        self.publish(self.auto_discovery.thermal_zone0, payload=self.create_hass_auto_conf('thermal-zone0', "\u00b0C", 'temperature', 'temperature'), retain=True)
+        self.publish(self.auto_discovery.duty_cycle, payload=self.create_hass_auto_conf('duty-cycle', '%', 'duty_cycle', 'None'), retain=True)
+        self.publish(self.auto_discovery.rpm, payload=self.create_hass_auto_conf('rpm', "rpm", 'rpm', 'None'), retain=True)
 
     def rc_to_str(self, rc):
         errors = {
